@@ -1,0 +1,159 @@
+---
+title: "Temocillin testing method comparison"
+format: html
+editor: visual
+execute:
+  echo: false
+  warning: false
+  message: false
+  error: false
+---
+
+## 
+
+```{r library}
+library(tidyverse)
+library(readxl)
+library(janitor)
+library(skimr)
+
+```
+
+```{r import temocillin data}
+Temocillin_CHEQS <- read_excel("~/R_Projects/CUH_Abx_review/Raw_data/Temocillin/Temocillin_CHEQS.xlsx") %>%
+  clean_names() %>%
+filter(!is.na(zone_size))%>% # clear empty panels from testing other MICs 
+group_by(specimen_number, susc_test_meth) %>% #keep last record per EUCAST or MIC per specimen
+slice(which.max(last_verified)) %>%
+ungroup()
+```
+
+```{r Skim Temocillin data}
+skim(Temocillin_CHEQS)
+```
+
+Data extracted from CHEQS - Microbiology results. Result filters set to date from 01/01/2023 to 21/10/26, and component to "TEMOCILLIN\|TEMGN"
+
+There are 19902 individual temocillin records from 18985 specimens and 12498 patients.
+
+```{r comparison table}
+
+Panels = Temocillin_CHEQS %>%
+  pivot_wider(names_from = susc_test_meth,
+              values_from = c(zone_size,susceptibility))%>%
+  mutate(ETEST = if_else(is.na(`zone_size_M ETEST`),
+                                       0,
+                                       1),
+         EUCAST = ifelse(is.na(`zone_size_M EUCAST`),
+                         0,
+                         1),
+         Both = ifelse(ETEST == 1 &
+                       EUCAST == 1,
+                        1,
+                        0)
+         ) 
+
+Panels %>%
+  summarise(n = n(),
+            `MIC and disc` = sum(Both),
+            .by = specimen_type)
+  
+```
+
+```{r discordance check by specimen type }
+library(gt)
+
+lvl <- c("S", "I", "R")
+
+xtab <- Panels %>%
+  filter(Both == 1) %>%
+  mutate(across(c(`susceptibility_M EUCAST`, `susceptibility_M ETEST`),
+                ~ factor(.x, levels = lvl))) %>%
+  count(specimen_type, `susceptibility_M EUCAST`, `susceptibility_M ETEST`,
+        .drop = FALSE) %>%
+  pivot_wider(names_from = `susceptibility_M ETEST`,
+              names_prefix = "ETEST:",
+              values_from = n,
+              values_fill = 0)
+
+xtab %>%
+  arrange(specimen_type, `susceptibility_M EUCAST`) %>%
+  gt(groupname_col = "specimen_type",
+     rowname_col   = "susceptibility_M EUCAST") %>%
+  tab_header(title = "Categorical agreement: EUCAST vs Etest",
+             subtitle = "By specimen type") %>%
+  #I <-> R mismatches (minor errors)
+  tab_style(style = cell_fill(color = "#F8D7DA"),
+            locations = list(
+              cells_body(columns = `ETEST:R`, rows = `susceptibility_M EUCAST` == "I"),
+              cells_body(columns = `ETEST:I`, rows = `susceptibility_M EUCAST` == "R"))) %>%
+  tab_stubhead(label = "EUCAST") %>%
+  cols_label_with(fn = ~ sub("ETEST:", "", .x)) %>%
+  tab_spanner(label = "Etest", columns = starts_with("ETEST:")) %>%
+  # shade the agreement diagonal
+  tab_style(style = cell_fill(color = "#E8F4EA"),
+            locations = list(
+              cells_body(columns = `ETEST:S`, rows = `susceptibility_M EUCAST` == "S"),
+              cells_body(columns = `ETEST:I`, rows = `susceptibility_M EUCAST` == "I"),
+              cells_body(columns = `ETEST:R`, rows = `susceptibility_M EUCAST` == "R"))) %>%
+  # flag very major errors (EUCAST R, Etest S)
+  tab_style(style = list(cell_fill(color = "#F8D7DA"), cell_text(weight = "bold")),
+            locations = cells_body(columns = `ETEST:S`,
+                                   rows = `susceptibility_M EUCAST` == "R")) %>%
+  summary_rows(groups = everything(),
+               columns = starts_with("ETEST:"),
+               fns = list(Total = ~ sum(.)),
+               fmt = ~ fmt_integer(.)) %>%
+  tab_options(row_group.font.weight = "bold")
+  
+
+```
+
+```{r discordance check by organism}
+
+library(gt)
+
+lvl <- c("S", "I", "R")
+
+xtab <- Panels %>%
+  filter(Both == 1) %>%
+  mutate(across(c(`susceptibility_M EUCAST`, `susceptibility_M ETEST`),
+                ~ factor(.x, levels = lvl))) %>%
+  count(organism_or_component, `susceptibility_M EUCAST`, `susceptibility_M ETEST`,
+        .drop = FALSE) %>%
+  pivot_wider(names_from = `susceptibility_M ETEST`,
+              names_prefix = "ETEST:",
+              values_from = n,
+              values_fill = 0)
+
+xtab %>%
+  arrange(organism_or_component, `susceptibility_M EUCAST`) %>%
+  gt(groupname_col = "organism_or_component",
+     rowname_col   = "susceptibility_M EUCAST") %>%
+  tab_header(title = "Categorical agreement: EUCAST vs Etest",
+             subtitle = "By organism") %>%
+  tab_stubhead(label = "EUCAST") %>%
+  cols_label_with(fn = ~ sub("ETEST:", "", .x)) %>%
+  tab_spanner(label = "Etest", columns = starts_with("ETEST:")) %>%
+  # shade the agreement diagonal
+  tab_style(style = cell_fill(color = "#E8F4EA"),
+            locations = list(
+              cells_body(columns = `ETEST:S`, rows = `susceptibility_M EUCAST` == "S"),
+              cells_body(columns = `ETEST:I`, rows = `susceptibility_M EUCAST` == "I"),
+              cells_body(columns = `ETEST:R`, rows = `susceptibility_M EUCAST` == "R"))) %>%
+  # flag very major errors (EUCAST R, Etest S)
+  tab_style(style = list(cell_fill(color = "#F8D7DA"), cell_text(weight = "bold")),
+            locations = cells_body(columns = `ETEST:S`,
+                                   rows = `susceptibility_M EUCAST` == "R")) %>%
+  #I <-> R mismatches (minor errors)
+  tab_style(style = cell_fill(color = "#F8D7DA"),
+            locations = list(
+              cells_body(columns = `ETEST:R`, rows = `susceptibility_M EUCAST` == "I"),
+              cells_body(columns = `ETEST:I`, rows = `susceptibility_M EUCAST` == "R"))) %>%
+  summary_rows(groups = everything(),
+               columns = starts_with("ETEST:"),
+               fns = list(Total = ~ sum(.)),
+               fmt = ~ fmt_integer(.)) %>%
+  tab_options(row_group.font.weight = "bold")
+  
+```
