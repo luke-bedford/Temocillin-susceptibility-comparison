@@ -15,21 +15,110 @@ execute:
 library(tidyverse)
 library(readxl)
 library(janitor)
-library(skimr)
 
 ```
 
 ```{r import temocillin data}
-Temocillin_CHEQS <- read_excel("~/R_Projects/CUH_Abx_review/Raw_data/Temocillin/Temocillin_CHEQS.xlsx") %>%
-  clean_names() %>%
-filter(!is.na(zone_size))%>% # clear empty panels from testing other MICs 
-group_by(specimen_number, susc_test_meth) %>% #keep last record per EUCAST or MIC per specimen
-slice(which.max(last_verified)) %>%
-ungroup()
+# Raw CHEQS extract is only available on the hospital network machine, so the
+# original import is kept here for provenance but not run on this machine.
+# Temocillin_CHEQS <- read_excel("~/R_Projects/CUH_Abx_review/Raw_data/Temocillin/Temocillin_CHEQS.xlsx") %>%
+#   clean_names() %>%
+#   filter(!is.na(zone_size))%>% # clear empty panels from testing other MICs
+#   group_by(specimen_number, susc_test_meth) %>% #keep last record per EUCAST or MIC per specimen
+#   slice(which.max(last_verified)) %>%
+#   ungroup()
+
+# Instead, load the already-processed (pivoted) panel-level data saved from
+# that pipeline, so this document can run standalone from temocillin_data.rds.
+Panels <- readRDS("temocillin_data.rds")
 ```
 
-```{r Skim Temocillin data}
-skim(Temocillin_CHEQS)
+```{r filter organisms of interest}
+# Restrict to E. coli (excluding mixed-growth and the O157 serotype),
+# Klebsiella spp. (excluding aerogenes), and Proteus mirabilis, and to
+# samples with both an EUCAST and an MIC (Etest) result recorded (Both == 1).
+organisms_of_interest <- Panels %>%
+  filter(
+    organism_or_component == "ESCHERICHIA COLI [202]" |
+      (str_detect(organism_or_component, "^KLEBSIELLA") &
+         !str_detect(organism_or_component, "AEROGENES")) |
+      organism_or_component == "PROTEUS MIRABILIS [338]"
+  ) %>%
+  filter(Both == 1) %>%
+  mutate(organism = organism_or_component %>%
+           str_remove("\\s*\\[\\d+\\]$") %>%
+           str_to_sentence(),
+         # Etest MIC (mg/L): strip </> qualifiers and ceiling at 256
+         MIC = `zone_size_M ETEST` %>%
+           str_remove_all("[<>]") %>%
+           as.numeric() %>%
+           pmin(256),
+         EUCAST = as.numeric(`zone_size_M EUCAST`),
+         # collapse Klebsiella species for plotting (keeps the 3-colour palette)
+         organism_group = if_else(str_detect(organism, "^Klebsiella"),
+                                   "Klebsiella spp.", organism))
+```
+
+```{r MIC vs EUCAST scatter}
+organisms_of_interest %>%
+  ggplot(aes(x = EUCAST, y = MIC, color = organism_group, shape = organism_group)) +
+  geom_count(alpha = 0.75) +
+  scale_y_log10(breaks = c(0.032, 0.064, 0.25, 1, 4, 16, 64, 256),
+                labels = c("0.032", "0.064", "0.25", "1", "4", "16", "64", "≥256")) +
+  scale_x_continuous(breaks = seq(0, 40, 5)) +
+  scale_color_manual(values = c("Escherichia coli" = "#2a78d6",
+                                 "Klebsiella spp." = "#eb6834",
+                                 "Proteus mirabilis" = "#1baf7a")) +
+  scale_shape_manual(values = c("Escherichia coli" = 16,
+                                 "Klebsiella spp." = 17,
+                                 "Proteus mirabilis" = 15)) +
+  labs(x = "EUCAST disc zone diameter (mm)",
+       y = "Etest MIC (mg/L, log scale)",
+       color = "Organism", shape = "Organism", size = "Count",
+       title = "MIC vs EUCAST zone diameter") +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank(),
+        legend.position = "right")
+```
+
+```{r MIC vs EUCAST scatter raw scale}
+organisms_of_interest %>%
+  ggplot(aes(x = EUCAST, y = MIC, color = organism_group, shape = organism_group)) +
+  geom_count(alpha = 0.75) +
+  scale_y_continuous(breaks = seq(0, 256, 32)) +
+  scale_x_continuous(breaks = seq(0, 40, 5)) +
+  scale_color_manual(values = c("Escherichia coli" = "#2a78d6",
+                                 "Klebsiella spp." = "#eb6834",
+                                 "Proteus mirabilis" = "#1baf7a")) +
+  scale_shape_manual(values = c("Escherichia coli" = 16,
+                                 "Klebsiella spp." = 17,
+                                 "Proteus mirabilis" = 15)) +
+  labs(x = "EUCAST disc zone diameter (mm)",
+       y = "Etest MIC (mg/L, raw scale)",
+       color = "Organism", shape = "Organism", size = "Count",
+       title = "MIC vs EUCAST zone diameter (raw MIC scale)") +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank(),
+        legend.position = "right")
+```
+
+```{r specimen type by organism crosstab}
+library(gt)
+
+organisms_of_interest %>%
+  count(specimen_type, organism, .drop = FALSE) %>%
+  pivot_wider(names_from = organism, values_from = n, values_fill = 0) %>%
+  mutate(Total = rowSums(across(where(is.numeric)))) %>%
+  gt(rowname_col = "specimen_type") %>%
+  tab_header(title = "Specimen type by organism",
+             subtitle = "E. coli, Klebsiella spp. (excl. aerogenes), and Proteus mirabilis") %>%
+  tab_stubhead(label = "Specimen type") %>%
+  grand_summary_rows(columns = everything(),
+                      fns = list(Total = ~ sum(.)),
+                      fmt = ~ fmt_integer(.)) %>%
+  tab_style(style = cell_text(weight = "bold"),
+            locations = cells_body(columns = Total)) %>%
+  tab_options(table.font.size = px(13))
 ```
 
 Data extracted from CHEQS - Microbiology results. Result filters set to date from 01/01/2023 to 21/10/26, and component to "TEMOCILLIN\|TEMGN"
@@ -38,20 +127,9 @@ There are 19902 individual temocillin records from 18985 specimens and 12498 pat
 
 ```{r comparison table}
 
-Panels = Temocillin_CHEQS %>%
-  pivot_wider(names_from = susc_test_meth,
-              values_from = c(zone_size,susceptibility))%>%
-  mutate(ETEST = if_else(is.na(`zone_size_M ETEST`),
-                                       0,
-                                       1),
-         EUCAST = ifelse(is.na(`zone_size_M EUCAST`),
-                         0,
-                         1),
-         Both = ifelse(ETEST == 1 &
-                       EUCAST == 1,
-                        1,
-                        0)
-         ) 
+# Panels is already pivoted (one row per specimen/organism with ETEST,
+# EUCAST and Both flags) in temocillin_data.rds, so no further reshaping
+# is needed here.
 
 Panels %>%
   summarise(n = n(),
@@ -60,13 +138,59 @@ Panels %>%
   
 ```
 
+```{r discordance check overall}
+library(gt)
+
+lvl <- c("S", "I", "R")
+
+# Overall categorical agreement for the inclusion-criteria cohort (E. coli,
+# Klebsiella spp. excl. aerogenes, Proteus mirabilis; Both == 1), with no
+# breakdown by specimen type or organism.
+xtab_overall <- organisms_of_interest %>%
+  mutate(across(c(`susceptibility_M EUCAST`, `susceptibility_M ETEST`),
+                ~ factor(.x, levels = lvl))) %>%
+  count(`susceptibility_M EUCAST`, `susceptibility_M ETEST`, .drop = FALSE) %>%
+  pivot_wider(names_from = `susceptibility_M ETEST`,
+              names_prefix = "ETEST:",
+              values_from = n,
+              values_fill = 0)
+
+xtab_overall %>%
+  arrange(`susceptibility_M EUCAST`) %>%
+  gt(rowname_col = "susceptibility_M EUCAST") %>%
+  tab_header(title = "Categorical agreement: EUCAST vs Etest",
+             subtitle = "Overall — both results present (n = 613)") %>%
+  tab_stubhead(label = "EUCAST") %>%
+  cols_label_with(fn = ~ sub("ETEST:", "", .x)) %>%
+  tab_spanner(label = "Etest", columns = starts_with("ETEST:")) %>%
+  # shade the agreement diagonal
+  tab_style(style = cell_fill(color = "#E8F4EA"),
+            locations = list(
+              cells_body(columns = `ETEST:S`, rows = `susceptibility_M EUCAST` == "S"),
+              cells_body(columns = `ETEST:I`, rows = `susceptibility_M EUCAST` == "I"),
+              cells_body(columns = `ETEST:R`, rows = `susceptibility_M EUCAST` == "R"))) %>%
+  # flag very major errors (EUCAST R, Etest S)
+  tab_style(style = list(cell_fill(color = "#F8D7DA"), cell_text(weight = "bold")),
+            locations = cells_body(columns = `ETEST:S`,
+                                   rows = `susceptibility_M EUCAST` == "R")) %>%
+  # I <-> R mismatches (minor errors)
+  tab_style(style = cell_fill(color = "#F8D7DA"),
+            locations = list(
+              cells_body(columns = `ETEST:R`, rows = `susceptibility_M EUCAST` == "I"),
+              cells_body(columns = `ETEST:I`, rows = `susceptibility_M EUCAST` == "R"))) %>%
+  grand_summary_rows(columns = starts_with("ETEST:"),
+                      fns = list(Total = ~ sum(.)),
+                      fmt = ~ fmt_integer(.))
+```
+
 ```{r discordance check by specimen type }
 library(gt)
 
 lvl <- c("S", "I", "R")
 
-xtab <- Panels %>%
-  filter(Both == 1) %>%
+# organisms_of_interest already applies the inclusion criteria: E. coli,
+# Klebsiella spp. (excl. aerogenes), Proteus mirabilis, and Both == 1.
+xtab <- organisms_of_interest %>%
   mutate(across(c(`susceptibility_M EUCAST`, `susceptibility_M ETEST`),
                 ~ factor(.x, levels = lvl))) %>%
   count(specimen_type, `susceptibility_M EUCAST`, `susceptibility_M ETEST`,
@@ -115,8 +239,9 @@ library(gt)
 
 lvl <- c("S", "I", "R")
 
-xtab <- Panels %>%
-  filter(Both == 1) %>%
+# organisms_of_interest already applies the inclusion criteria: E. coli,
+# Klebsiella spp. (excl. aerogenes), Proteus mirabilis, and Both == 1.
+xtab <- organisms_of_interest %>%
   mutate(across(c(`susceptibility_M EUCAST`, `susceptibility_M ETEST`),
                 ~ factor(.x, levels = lvl))) %>%
   count(organism_or_component, `susceptibility_M EUCAST`, `susceptibility_M ETEST`,
@@ -155,5 +280,65 @@ xtab %>%
                fns = list(Total = ~ sum(.)),
                fmt = ~ fmt_integer(.)) %>%
   tab_options(row_group.font.weight = "bold")
-  
+
+```
+
+## Agreement summary
+
+```{r agreement summary setup}
+# Categorical agreement, and S<->R category changes (major/very major errors),
+# for the inclusion-criteria cohort (Both == 1). A handful of samples have a
+# zone size recorded but no EUCAST susceptibility call and are excluded from
+# these agreement figures (denominator noted per table).
+summarise_agreement <- function(df) {
+  df %>%
+    filter(!is.na(`susceptibility_M EUCAST`), !is.na(`susceptibility_M ETEST`)) %>%
+    summarise(
+      n = n(),
+      `Agreement, n (%)` = sprintf("%d (%.1f%%)",
+                                    sum(`susceptibility_M EUCAST` == `susceptibility_M ETEST`),
+                                    100 * mean(`susceptibility_M EUCAST` == `susceptibility_M ETEST`)),
+      `S to R, n (%)` = sprintf("%d (%.1f%%)",
+                                 sum(`susceptibility_M EUCAST` == "S" & `susceptibility_M ETEST` == "R"),
+                                 100 * mean(`susceptibility_M EUCAST` == "S" & `susceptibility_M ETEST` == "R")),
+      `R to S, n (%)` = sprintf("%d (%.1f%%)",
+                                 sum(`susceptibility_M EUCAST` == "R" & `susceptibility_M ETEST` == "S"),
+                                 100 * mean(`susceptibility_M EUCAST` == "R" & `susceptibility_M ETEST` == "S")),
+      .groups = "drop"
+    )
+}
+
+excluded_n <- nrow(organisms_of_interest) -
+  sum(!is.na(organisms_of_interest[["susceptibility_M EUCAST"]]) &
+        !is.na(organisms_of_interest[["susceptibility_M ETEST"]]))
+```
+
+```{r agreement summary overall}
+organisms_of_interest %>%
+  summarise_agreement() %>%
+  gt() %>%
+  tab_header(title = "Agreement summary", subtitle = "Overall") %>%
+  cols_label(n = "n (valid pairs)") %>%
+  tab_footnote(footnote = paste0(excluded_n, " sample(s) excluded: EUCAST susceptibility category not recorded.")) %>%
+  tab_options(table.font.size = px(13))
+```
+
+```{r agreement summary by organism}
+organisms_of_interest %>%
+  group_by(organism) %>%
+  summarise_agreement() %>%
+  gt(rowname_col = "organism") %>%
+  tab_header(title = "Agreement summary", subtitle = "By organism") %>%
+  cols_label(n = "n (valid pairs)") %>%
+  tab_options(table.font.size = px(13))
+```
+
+```{r agreement summary by specimen type}
+organisms_of_interest %>%
+  group_by(specimen_type) %>%
+  summarise_agreement() %>%
+  gt(rowname_col = "specimen_type") %>%
+  tab_header(title = "Agreement summary", subtitle = "By specimen type") %>%
+  cols_label(n = "n (valid pairs)") %>%
+  tab_options(table.font.size = px(13))
 ```
