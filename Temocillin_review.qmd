@@ -54,27 +54,57 @@ organisms_of_interest <- Panels %>%
            as.numeric() %>%
            pmin(256),
          EUCAST = as.numeric(`zone_size_M EUCAST`),
+         # Re-derive S/I/R from the raw zone size / MIC using the EUCAST
+         # v16.1 temocillin breakpoints documented in CLAUDE.md (zone: S>=50,
+         # R<17; MIC: S<=0.001, R>16), rather than relying on the recorded
+         # susceptibility_M EUCAST / susceptibility_M ETEST fields (which
+         # have a few gaps/edge cases). Downstream tables use these new
+         # columns but keep the original "EUCAST" / "Etest" labelling.
+         EUCAST_interp = case_when(
+           is.na(EUCAST) ~ NA_character_,
+           EUCAST < 17 ~ "R",
+           EUCAST < 50 ~ "I",
+           TRUE ~ "S"
+         ),
+         ETEST_interp = case_when(
+           is.na(MIC) ~ NA_character_,
+           MIC > 16 ~ "R",
+           MIC > 0.001 ~ "I",
+           TRUE ~ "S"
+         ),
          # collapse Klebsiella species for plotting (keeps the 3-colour palette)
          organism_group = if_else(str_detect(organism, "^Klebsiella"),
-                                   "Klebsiella spp.", organism))
+                                   "Klebsiella spp.", organism),
+         # match status between the re-interpreted EUCAST and Etest calls
+         match_status = case_when(
+           EUCAST_interp == ETEST_interp ~ "Agreement",
+           EUCAST_interp == "I" & ETEST_interp == "R" ~ "I to R",
+           EUCAST_interp == "R" & ETEST_interp == "I" ~ "R to I"
+         ))
 ```
 
 ```{r MIC vs EUCAST scatter}
+# EUCAST R/I cutoffs from CLAUDE.md: disc zone 17mm, MIC 16 mg/L. (The S
+# cutoffs, zone >=50mm / MIC <=0.001 mg/L, fall outside the achievable data
+# range and aren't shown.)
 organisms_of_interest %>%
-  ggplot(aes(x = EUCAST, y = MIC, color = organism_group, shape = organism_group)) +
+  mutate(match_status = factor(match_status, levels = c("Agreement", "I to R", "R to I"))) %>%
+  ggplot(aes(x = EUCAST, y = MIC, color = match_status)) +
+  geom_vline(xintercept = 17, linetype = "dashed", color = "#898781") +
+  geom_hline(yintercept = 16, linetype = "dashed", color = "#898781") +
+  annotate("text", x = 17, y = 256, label = "17mm", hjust = -0.1, size = 3, color = "#52514e") +
+  annotate("text", x = 5, y = 16, label = "16 mg/L", vjust = -0.5, size = 3, color = "#52514e") +
   geom_count(alpha = 0.75) +
   scale_y_log10(breaks = c(0.032, 0.064, 0.25, 1, 4, 16, 64, 256),
                 labels = c("0.032", "0.064", "0.25", "1", "4", "16", "64", "≥256")) +
   scale_x_continuous(breaks = seq(0, 40, 5)) +
-  scale_color_manual(values = c("Escherichia coli" = "#2a78d6",
-                                 "Klebsiella spp." = "#eb6834",
-                                 "Proteus mirabilis" = "#1baf7a")) +
-  scale_shape_manual(values = c("Escherichia coli" = 16,
-                                 "Klebsiella spp." = 17,
-                                 "Proteus mirabilis" = 15)) +
+  # status colour: green = agreement, amber/red = the two discordant directions
+  scale_color_manual(values = c("Agreement" = "#0ca30c",
+                                 "I to R" = "#fab219",
+                                 "R to I" = "#d03b3b")) +
   labs(x = "EUCAST disc zone diameter (mm)",
        y = "Etest MIC (mg/L, log scale)",
-       color = "Organism", shape = "Organism", size = "Count",
+       color = "EUCAST vs Etest", size = "Count",
        title = "MIC vs EUCAST zone diameter") +
   theme_minimal(base_size = 12) +
   theme(panel.grid.minor = element_blank(),
@@ -82,8 +112,13 @@ organisms_of_interest %>%
 ```
 
 ```{r MIC vs EUCAST scatter raw scale}
+# Same EUCAST R/I cutoffs as above: disc zone 17mm, MIC 16 mg/L.
 organisms_of_interest %>%
   ggplot(aes(x = EUCAST, y = MIC, color = organism_group, shape = organism_group)) +
+  geom_vline(xintercept = 17, linetype = "dashed", color = "#898781") +
+  geom_hline(yintercept = 16, linetype = "dashed", color = "#898781") +
+  annotate("text", x = 17, y = 256, label = "17mm", hjust = -0.1, size = 3, color = "#52514e") +
+  annotate("text", x = 5, y = 16, label = "16 mg/L", vjust = -0.8, size = 3, color = "#52514e") +
   geom_count(alpha = 0.75) +
   scale_y_continuous(breaks = seq(0, 256, 32)) +
   scale_x_continuous(breaks = seq(0, 40, 5)) +
@@ -145,19 +180,19 @@ lvl <- c("S", "I", "R")
 
 # Overall categorical agreement for the inclusion-criteria cohort (E. coli,
 # Klebsiella spp. excl. aerogenes, Proteus mirabilis; Both == 1), with no
-# breakdown by specimen type or organism.
+# breakdown by specimen type or organism. Uses EUCAST_interp / ETEST_interp
+# (zone/MIC re-interpreted against the CLAUDE.md breakpoints).
 xtab_overall <- organisms_of_interest %>%
-  mutate(across(c(`susceptibility_M EUCAST`, `susceptibility_M ETEST`),
-                ~ factor(.x, levels = lvl))) %>%
-  count(`susceptibility_M EUCAST`, `susceptibility_M ETEST`, .drop = FALSE) %>%
-  pivot_wider(names_from = `susceptibility_M ETEST`,
+  mutate(across(c(EUCAST_interp, ETEST_interp), ~ factor(.x, levels = lvl))) %>%
+  count(EUCAST_interp, ETEST_interp, .drop = FALSE) %>%
+  pivot_wider(names_from = ETEST_interp,
               names_prefix = "ETEST:",
               values_from = n,
               values_fill = 0)
 
 xtab_overall %>%
-  arrange(`susceptibility_M EUCAST`) %>%
-  gt(rowname_col = "susceptibility_M EUCAST") %>%
+  arrange(EUCAST_interp) %>%
+  gt(rowname_col = "EUCAST_interp") %>%
   tab_header(title = "Categorical agreement: EUCAST vs Etest",
              subtitle = "Overall — both results present (n = 613)") %>%
   tab_stubhead(label = "EUCAST") %>%
@@ -166,18 +201,18 @@ xtab_overall %>%
   # shade the agreement diagonal
   tab_style(style = cell_fill(color = "#E8F4EA"),
             locations = list(
-              cells_body(columns = `ETEST:S`, rows = `susceptibility_M EUCAST` == "S"),
-              cells_body(columns = `ETEST:I`, rows = `susceptibility_M EUCAST` == "I"),
-              cells_body(columns = `ETEST:R`, rows = `susceptibility_M EUCAST` == "R"))) %>%
+              cells_body(columns = `ETEST:S`, rows = EUCAST_interp == "S"),
+              cells_body(columns = `ETEST:I`, rows = EUCAST_interp == "I"),
+              cells_body(columns = `ETEST:R`, rows = EUCAST_interp == "R"))) %>%
   # flag very major errors (EUCAST R, Etest S)
   tab_style(style = list(cell_fill(color = "#F8D7DA"), cell_text(weight = "bold")),
             locations = cells_body(columns = `ETEST:S`,
-                                   rows = `susceptibility_M EUCAST` == "R")) %>%
+                                   rows = EUCAST_interp == "R")) %>%
   # I <-> R mismatches (minor errors)
   tab_style(style = cell_fill(color = "#F8D7DA"),
             locations = list(
-              cells_body(columns = `ETEST:R`, rows = `susceptibility_M EUCAST` == "I"),
-              cells_body(columns = `ETEST:I`, rows = `susceptibility_M EUCAST` == "R"))) %>%
+              cells_body(columns = `ETEST:R`, rows = EUCAST_interp == "I"),
+              cells_body(columns = `ETEST:I`, rows = EUCAST_interp == "R"))) %>%
   grand_summary_rows(columns = starts_with("ETEST:"),
                       fns = list(Total = ~ sum(.)),
                       fmt = ~ fmt_integer(.))
@@ -190,46 +225,47 @@ lvl <- c("S", "I", "R")
 
 # organisms_of_interest already applies the inclusion criteria: E. coli,
 # Klebsiella spp. (excl. aerogenes), Proteus mirabilis, and Both == 1.
+# Uses EUCAST_interp / ETEST_interp (zone/MIC re-interpreted against the
+# CLAUDE.md breakpoints).
 xtab <- organisms_of_interest %>%
-  mutate(across(c(`susceptibility_M EUCAST`, `susceptibility_M ETEST`),
-                ~ factor(.x, levels = lvl))) %>%
-  count(specimen_type, `susceptibility_M EUCAST`, `susceptibility_M ETEST`,
+  mutate(across(c(EUCAST_interp, ETEST_interp), ~ factor(.x, levels = lvl))) %>%
+  count(specimen_type, EUCAST_interp, ETEST_interp,
         .drop = FALSE) %>%
-  pivot_wider(names_from = `susceptibility_M ETEST`,
+  pivot_wider(names_from = ETEST_interp,
               names_prefix = "ETEST:",
               values_from = n,
               values_fill = 0)
 
 xtab %>%
-  arrange(specimen_type, `susceptibility_M EUCAST`) %>%
+  arrange(specimen_type, EUCAST_interp) %>%
   gt(groupname_col = "specimen_type",
-     rowname_col   = "susceptibility_M EUCAST") %>%
+     rowname_col   = "EUCAST_interp") %>%
   tab_header(title = "Categorical agreement: EUCAST vs Etest",
              subtitle = "By specimen type") %>%
   #I <-> R mismatches (minor errors)
   tab_style(style = cell_fill(color = "#F8D7DA"),
             locations = list(
-              cells_body(columns = `ETEST:R`, rows = `susceptibility_M EUCAST` == "I"),
-              cells_body(columns = `ETEST:I`, rows = `susceptibility_M EUCAST` == "R"))) %>%
+              cells_body(columns = `ETEST:R`, rows = EUCAST_interp == "I"),
+              cells_body(columns = `ETEST:I`, rows = EUCAST_interp == "R"))) %>%
   tab_stubhead(label = "EUCAST") %>%
   cols_label_with(fn = ~ sub("ETEST:", "", .x)) %>%
   tab_spanner(label = "Etest", columns = starts_with("ETEST:")) %>%
   # shade the agreement diagonal
   tab_style(style = cell_fill(color = "#E8F4EA"),
             locations = list(
-              cells_body(columns = `ETEST:S`, rows = `susceptibility_M EUCAST` == "S"),
-              cells_body(columns = `ETEST:I`, rows = `susceptibility_M EUCAST` == "I"),
-              cells_body(columns = `ETEST:R`, rows = `susceptibility_M EUCAST` == "R"))) %>%
+              cells_body(columns = `ETEST:S`, rows = EUCAST_interp == "S"),
+              cells_body(columns = `ETEST:I`, rows = EUCAST_interp == "I"),
+              cells_body(columns = `ETEST:R`, rows = EUCAST_interp == "R"))) %>%
   # flag very major errors (EUCAST R, Etest S)
   tab_style(style = list(cell_fill(color = "#F8D7DA"), cell_text(weight = "bold")),
             locations = cells_body(columns = `ETEST:S`,
-                                   rows = `susceptibility_M EUCAST` == "R")) %>%
+                                   rows = EUCAST_interp == "R")) %>%
   summary_rows(groups = everything(),
                columns = starts_with("ETEST:"),
                fns = list(Total = ~ sum(.)),
                fmt = ~ fmt_integer(.)) %>%
   tab_options(row_group.font.weight = "bold")
-  
+
 
 ```
 
@@ -241,20 +277,21 @@ lvl <- c("S", "I", "R")
 
 # organisms_of_interest already applies the inclusion criteria: E. coli,
 # Klebsiella spp. (excl. aerogenes), Proteus mirabilis, and Both == 1.
+# Uses EUCAST_interp / ETEST_interp (zone/MIC re-interpreted against the
+# CLAUDE.md breakpoints).
 xtab <- organisms_of_interest %>%
-  mutate(across(c(`susceptibility_M EUCAST`, `susceptibility_M ETEST`),
-                ~ factor(.x, levels = lvl))) %>%
-  count(organism_or_component, `susceptibility_M EUCAST`, `susceptibility_M ETEST`,
+  mutate(across(c(EUCAST_interp, ETEST_interp), ~ factor(.x, levels = lvl))) %>%
+  count(organism_or_component, EUCAST_interp, ETEST_interp,
         .drop = FALSE) %>%
-  pivot_wider(names_from = `susceptibility_M ETEST`,
+  pivot_wider(names_from = ETEST_interp,
               names_prefix = "ETEST:",
               values_from = n,
               values_fill = 0)
 
 xtab %>%
-  arrange(organism_or_component, `susceptibility_M EUCAST`) %>%
+  arrange(organism_or_component, EUCAST_interp) %>%
   gt(groupname_col = "organism_or_component",
-     rowname_col   = "susceptibility_M EUCAST") %>%
+     rowname_col   = "EUCAST_interp") %>%
   tab_header(title = "Categorical agreement: EUCAST vs Etest",
              subtitle = "By organism") %>%
   tab_stubhead(label = "EUCAST") %>%
@@ -263,18 +300,18 @@ xtab %>%
   # shade the agreement diagonal
   tab_style(style = cell_fill(color = "#E8F4EA"),
             locations = list(
-              cells_body(columns = `ETEST:S`, rows = `susceptibility_M EUCAST` == "S"),
-              cells_body(columns = `ETEST:I`, rows = `susceptibility_M EUCAST` == "I"),
-              cells_body(columns = `ETEST:R`, rows = `susceptibility_M EUCAST` == "R"))) %>%
+              cells_body(columns = `ETEST:S`, rows = EUCAST_interp == "S"),
+              cells_body(columns = `ETEST:I`, rows = EUCAST_interp == "I"),
+              cells_body(columns = `ETEST:R`, rows = EUCAST_interp == "R"))) %>%
   # flag very major errors (EUCAST R, Etest S)
   tab_style(style = list(cell_fill(color = "#F8D7DA"), cell_text(weight = "bold")),
             locations = cells_body(columns = `ETEST:S`,
-                                   rows = `susceptibility_M EUCAST` == "R")) %>%
+                                   rows = EUCAST_interp == "R")) %>%
   #I <-> R mismatches (minor errors)
   tab_style(style = cell_fill(color = "#F8D7DA"),
             locations = list(
-              cells_body(columns = `ETEST:R`, rows = `susceptibility_M EUCAST` == "I"),
-              cells_body(columns = `ETEST:I`, rows = `susceptibility_M EUCAST` == "R"))) %>%
+              cells_body(columns = `ETEST:R`, rows = EUCAST_interp == "I"),
+              cells_body(columns = `ETEST:I`, rows = EUCAST_interp == "R"))) %>%
   summary_rows(groups = everything(),
                columns = starts_with("ETEST:"),
                fns = list(Total = ~ sum(.)),
@@ -286,41 +323,49 @@ xtab %>%
 ## Agreement summary
 
 ```{r agreement summary setup}
-# Categorical agreement, and S<->R category changes (major/very major errors),
-# for the inclusion-criteria cohort (Both == 1). A handful of samples have a
-# zone size recorded but no EUCAST susceptibility call and are excluded from
-# these agreement figures (denominator noted per table).
+# Categorical agreement, and I<->R category changes, for the
+# inclusion-criteria cohort (Both == 1), using EUCAST_interp / ETEST_interp
+# (zone/MIC re-interpreted against the CLAUDE.md breakpoints).
+# Re-deriving from the raw zone size/MIC recovers samples that had a zone
+# size but no recorded EUCAST susceptibility call, so this denominator can
+# be larger than when using the recorded fields directly.
 summarise_agreement <- function(df) {
   df %>%
-    filter(!is.na(`susceptibility_M EUCAST`), !is.na(`susceptibility_M ETEST`)) %>%
+    filter(!is.na(EUCAST_interp), !is.na(ETEST_interp)) %>%
     summarise(
       n = n(),
       `Agreement, n (%)` = sprintf("%d (%.1f%%)",
-                                    sum(`susceptibility_M EUCAST` == `susceptibility_M ETEST`),
-                                    100 * mean(`susceptibility_M EUCAST` == `susceptibility_M ETEST`)),
-      `S to R, n (%)` = sprintf("%d (%.1f%%)",
-                                 sum(`susceptibility_M EUCAST` == "S" & `susceptibility_M ETEST` == "R"),
-                                 100 * mean(`susceptibility_M EUCAST` == "S" & `susceptibility_M ETEST` == "R")),
-      `R to S, n (%)` = sprintf("%d (%.1f%%)",
-                                 sum(`susceptibility_M EUCAST` == "R" & `susceptibility_M ETEST` == "S"),
-                                 100 * mean(`susceptibility_M EUCAST` == "R" & `susceptibility_M ETEST` == "S")),
+                                    sum(EUCAST_interp == ETEST_interp),
+                                    100 * mean(EUCAST_interp == ETEST_interp)),
+      `I to R, n (%)` = sprintf("%d (%.1f%%)",
+                                 sum(EUCAST_interp == "I" & ETEST_interp == "R"),
+                                 100 * mean(EUCAST_interp == "I" & ETEST_interp == "R")),
+      `R to I, n (%)` = sprintf("%d (%.1f%%)",
+                                 sum(EUCAST_interp == "R" & ETEST_interp == "I"),
+                                 100 * mean(EUCAST_interp == "R" & ETEST_interp == "I")),
       .groups = "drop"
     )
 }
 
 excluded_n <- nrow(organisms_of_interest) -
-  sum(!is.na(organisms_of_interest[["susceptibility_M EUCAST"]]) &
-        !is.na(organisms_of_interest[["susceptibility_M ETEST"]]))
+  sum(!is.na(organisms_of_interest$EUCAST_interp) &
+        !is.na(organisms_of_interest$ETEST_interp))
 ```
 
 ```{r agreement summary overall}
-organisms_of_interest %>%
+tbl_agreement_overall <- organisms_of_interest %>%
   summarise_agreement() %>%
   gt() %>%
   tab_header(title = "Agreement summary", subtitle = "Overall") %>%
   cols_label(n = "n (valid pairs)") %>%
-  tab_footnote(footnote = paste0(excluded_n, " sample(s) excluded: EUCAST susceptibility category not recorded.")) %>%
   tab_options(table.font.size = px(13))
+
+if (excluded_n > 0) {
+  tbl_agreement_overall <- tbl_agreement_overall %>%
+    tab_footnote(footnote = paste0(excluded_n, " sample(s) excluded: zone size/MIC not recorded."))
+}
+
+tbl_agreement_overall
 ```
 
 ```{r agreement summary by organism}
@@ -340,5 +385,326 @@ organisms_of_interest %>%
   gt(rowname_col = "specimen_type") %>%
   tab_header(title = "Agreement summary", subtitle = "By specimen type") %>%
   cols_label(n = "n (valid pairs)") %>%
+  tab_options(table.font.size = px(13))
+```
+
+## Zone diameter distribution (full dataset)
+
+```{r zone diameter full dataset setup}
+# Unlike the rest of the report, this uses the FULL dataset (all organisms,
+# not just the E. coli/Klebsiella/Proteus inclusion criteria), to see how
+# the EUCAST disc zone diameter is distributed across every specimen type
+# and organism recorded. Drops 37 rows with no recorded zone and the 3 rows
+# with a physically impossible zone (81/223/230mm, almost certainly
+# data-entry typos, as found in the earlier breakpoint QC check).
+#
+# Organisms with very small counts are amalgamated to genus level: the
+# single "E. coli type O157" row folds into Escherichia coli (same species,
+# different serotype); "Klebsiella sp" (n=2, unspecified species) becomes
+# its own small "Klebsiella spp." group; the single mixed-growth "E. coli /
+# Hafnia alvei" row (two different genera) goes to "Other / mixed growth"
+# rather than being forced into either genus. Klebsiella oxytoca,
+# pneumoniae and variicola, Proteus mirabilis and Coliform bacilli all have
+# enough samples (>=120) to stand alone.
+Panels_zone <- Panels %>%
+  mutate(EUCAST_zone = as.numeric(`zone_size_M EUCAST`)) %>%
+  filter(!is.na(EUCAST_zone), EUCAST_zone <= 50) %>%
+  mutate(
+    organism_group_full = case_when(
+      str_detect(organism_or_component, "HAFNIA ALVEI") ~ "Other / mixed growth",
+      str_detect(organism_or_component, "^ESCHERICHIA COLI") ~ "Escherichia coli",
+      organism_or_component == "KLEBSIELLA PNEUMONIAE [254]" ~ "Klebsiella pneumoniae",
+      organism_or_component == "KLEBSIELLA OXYTOCA [253]" ~ "Klebsiella oxytoca",
+      organism_or_component == "KLEBSIELLA VARIICOLA [909]" ~ "Klebsiella variicola",
+      organism_or_component == "KLEBSIELLA SP [908]" ~ "Klebsiella spp. (other)",
+      organism_or_component == "PROTEUS MIRABILIS [338]" ~ "Proteus mirabilis",
+      organism_or_component == "COLIFORM BACILLI [779]" ~ "Coliform bacilli"
+    )
+  )
+```
+
+```{r zone diameter by specimen type}
+Panels_zone %>%
+  add_count(specimen_type) %>%
+  mutate(label = fct_reorder(paste0(specimen_type, " (n=", n, ")"), n)) %>%
+  ggplot(aes(x = label, y = EUCAST_zone)) +
+  geom_hline(yintercept = 17, linetype = "dashed", color = "#898781") +
+  geom_boxplot(fill = "#2a78d6", alpha = 0.6, outlier.alpha = 0.4, outlier.size = 0.8) +
+  coord_flip() +
+  scale_y_continuous(breaks = seq(0, 50, 10)) +
+  labs(x = NULL, y = "EUCAST disc zone diameter (mm)",
+       title = "Zone diameter distribution by specimen type",
+       subtitle = "Full dataset; dashed = EUCAST R/I cutoff (17mm)") +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank())
+```
+
+```{r zone diameter by organism}
+Panels_zone %>%
+  add_count(organism_group_full) %>%
+  mutate(label = fct_reorder(paste0(organism_group_full, " (n=", n, ")"), n)) %>%
+  ggplot(aes(x = label, y = EUCAST_zone)) +
+  geom_hline(yintercept = 17, linetype = "dashed", color = "#898781") +
+  geom_boxplot(fill = "#2a78d6", alpha = 0.6, outlier.alpha = 0.4, outlier.size = 0.8) +
+  coord_flip() +
+  scale_y_continuous(breaks = seq(0, 50, 10)) +
+  labs(x = NULL, y = "EUCAST disc zone diameter (mm)",
+       title = "Zone diameter distribution by organism",
+       subtitle = "Small organism counts grouped by genus; dashed = EUCAST R/I cutoff (17mm)") +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank())
+```
+
+Swab isolates show smaller zone diameters than other specimen types overall. This holds
+within every individual organism (not just because swabs have a different organism mix),
+though the organism mix does also differ: swabs are proportionally richer in *Klebsiella
+pneumoniae* (36% of swabs vs 17% of other specimen types) and leaner in *E. coli* (58% vs
+77%), and K. pneumoniae itself tends to run smaller zones than E. coli.
+
+```{r zone diameter swab vs other by organism}
+Panels_zone %>%
+  filter(organism_group_full %in% c("Escherichia coli", "Klebsiella pneumoniae",
+                                     "Klebsiella oxytoca", "Klebsiella variicola",
+                                     "Coliform bacilli", "Proteus mirabilis")) %>%
+  mutate(specimen_group = if_else(specimen_type == "Swab", "Swab", "All other specimen types"),
+         organism_group_full = fct_reorder(organism_group_full, EUCAST_zone)) %>%
+  ggplot(aes(x = organism_group_full, y = EUCAST_zone, fill = specimen_group)) +
+  geom_hline(yintercept = 17, linetype = "dashed", color = "#898781") +
+  geom_boxplot(alpha = 0.75, outlier.alpha = 0.4, outlier.size = 0.8,
+               position = position_dodge(width = 0.8), width = 0.7) +
+  coord_flip() +
+  scale_y_continuous(breaks = seq(0, 50, 10)) +
+  scale_fill_manual(values = c("Swab" = "#eb6834", "All other specimen types" = "#2a78d6")) +
+  labs(x = NULL, y = "EUCAST disc zone diameter (mm)", fill = NULL,
+       title = "Zone diameter: Swab vs other specimen types, by organism",
+       subtitle = "Full dataset; dashed = EUCAST R/I cutoff (17mm)") +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank(), legend.position = "top")
+```
+
+### Significance testing across specimen types
+
+Zone diameter distributions are skewed and heavy-tailed, vary substantially in spread
+across specimen types (the Swab box above is visibly wider than Blood's or Urine's),
+and specimen-type group sizes range from n=1 to n>7000 — violating the normality and
+equal-variance assumptions a standard one-way ANOVA (a test of **mean** differences)
+relies on. A **Kruskal-Wallis test** — the rank-based, non-parametric analogue of
+one-way ANOVA, comparing distributions/rank-location rather than means directly — is
+used for the omnibus comparison, followed by pairwise **Wilcoxon rank-sum tests** with
+Benjamini-Hochberg FDR correction for the resulting multiple comparisons. Pairwise
+testing is restricted to specimen types with at least 20 samples (Urine, Blood, Swab,
+Body Fluid, Sputum, Tissue, Drain/Tube/Other device, Broncho-alveolar Lavage, Fluid),
+since comparisons involving the smallest groups (Cerebrospinal Fluid, Synovial Fluid,
+Stool, Transport solution, Dialysis fluid, Post mortem swab, Other; all n<=18) aren't
+statistically meaningful.
+
+```{r kruskal wallis setup}
+specimen_n20 <- Panels_zone %>% count(specimen_type) %>% filter(n >= 20) %>% pull(specimen_type)
+Panels_zone_n20 <- Panels_zone %>% filter(specimen_type %in% specimen_n20)
+
+kw_result <- kruskal.test(EUCAST_zone ~ specimen_type, data = Panels_zone_n20)
+```
+
+```{r kruskal wallis omnibus table}
+tibble(
+  Test = "Kruskal-Wallis (omnibus)",
+  `Specimen types` = length(specimen_n20),
+  n = nrow(Panels_zone_n20),
+  `Chi-squared` = round(unname(kw_result$statistic), 1),
+  df = unname(kw_result$parameter),
+  `p-value` = if (kw_result$p.value < 0.001) "<0.001" else formatC(kw_result$p.value, format = "f", digits = 3)
+) %>%
+  gt() %>%
+  tab_header(title = "Zone diameter across specimen types",
+             subtitle = "Omnibus test (specimen types with n>=20)") %>%
+  tab_options(table.font.size = px(13))
+```
+
+```{r pairwise wilcoxon table}
+pw <- pairwise.wilcox.test(Panels_zone_n20$EUCAST_zone, Panels_zone_n20$specimen_type,
+                            p.adjust.method = "BH")
+
+pw_wide <- as.data.frame(pw$p.value) %>%
+  rownames_to_column("group1")
+
+pw_wide %>%
+  gt(rowname_col = "group1") %>%
+  tab_header(title = "Pairwise comparisons: zone diameter by specimen type",
+             subtitle = "Wilcoxon rank-sum, Benjamini-Hochberg-adjusted p-value") %>%
+  tab_stubhead(label = "") %>%
+  data_color(columns = -group1,
+             fn = function(x) ifelse(is.na(x), "#fcfcfb",
+                                      ifelse(x < 0.05, "#f8d7da", "#e8f4ea"))) %>%
+  fmt(columns = -group1,
+      fns = function(x) ifelse(is.na(x), "",
+                                ifelse(x < 0.001, "<0.001", formatC(x, format = "f", digits = 3)))) %>%
+  tab_source_note("Green = no significant difference (p>=0.05, BH-adjusted); red = significant difference (p<0.05).") %>%
+  tab_options(table.font.size = px(12))
+```
+
+Swab is significantly different (adjusted p<0.001) from every other specimen type with
+adequate sample size, consistent with the visual pattern above: zone diameters in swabs
+are genuinely smaller than in other specimen types, not an artefact of a particular
+comparison.
+
+## Predicting discordance by specimen type (Swab, Urine, Blood)
+
+The paired MIC/Disc data (`organisms_of_interest`) only has 613 samples with both an
+EUCAST and an Etest result, and 585 of those are Blood (4 Swab, 3 Urine) — too few to
+observe Swab/Urine discordance rates directly. Instead, since `EUCAST_interp` is a
+deterministic step function of zone diameter, the only real uncertainty is P(Etest = R)
+given the zone diameter. A **logistic regression** of Etest result (R vs I) on EUCAST
+zone diameter is fit on the 613 paired samples, then applied to every isolate's actual
+zone diameter (whether or not it had an Etest done) for the three inclusion-criteria
+organisms in Swab, Urine, and Blood, to get an expected (summed-probability) count of
+Agreement / I-to-R / R-to-I per specimen type.
+
+```{r logistic model setup}
+organisms_of_interest <- organisms_of_interest %>%
+  mutate(ETEST_R = ETEST_interp == "R")
+
+logit_model <- glm(ETEST_R ~ EUCAST, data = organisms_of_interest, family = binomial)
+```
+
+```{r logistic model diagnostics table}
+coefs <- coef(summary(logit_model))
+null_model <- glm(ETEST_R ~ 1, data = organisms_of_interest, family = binomial)
+mcfadden_r2 <- 1 - as.numeric(logLik(logit_model)) / as.numeric(logLik(null_model))
+train_pred <- ifelse(predict(logit_model, type = "response") > 0.5, "R", "I")
+train_acc <- mean(train_pred == organisms_of_interest$ETEST_interp)
+
+tibble(Term = rownames(coefs),
+       Estimate = round(coefs[, "Estimate"], 3),
+       `Std. Error` = round(coefs[, "Std. Error"], 3),
+       `z value` = round(coefs[, "z value"], 2),
+       `p-value` = if_else(coefs[, "Pr(>|z|)"] < 0.001, "<0.001",
+                            formatC(coefs[, "Pr(>|z|)"], format = "f", digits = 3))) %>%
+  gt() %>%
+  tab_header(title = "Logistic regression: P(Etest = R) ~ EUCAST zone diameter",
+             subtitle = paste0("n = ", nrow(organisms_of_interest),
+                                "; McFadden R² = ", round(mcfadden_r2, 3),
+                                "; AIC = ", round(AIC(logit_model), 1),
+                                "; training accuracy = ", scales::percent(train_acc, accuracy = 0.1))) %>%
+  tab_options(table.font.size = px(13))
+```
+
+```{r logistic model training confusion matrix}
+tibble(actual = organisms_of_interest$ETEST_interp, predicted = train_pred) %>%
+  count(actual, predicted) %>%
+  pivot_wider(names_from = predicted, values_from = n, values_fill = 0) %>%
+  gt(rowname_col = "actual") %>%
+  tab_header(title = "Training confusion matrix (threshold = 0.5)",
+             subtitle = "Rows = actual Etest result, columns = predicted") %>%
+  tab_stubhead(label = "Actual") %>%
+  tab_options(table.font.size = px(13))
+```
+
+```{r logistic model fit plot}
+curve_df <- tibble(EUCAST = seq(min(organisms_of_interest$EUCAST),
+                                 max(organisms_of_interest$EUCAST), length.out = 100)) %>%
+  mutate(p_R = predict(logit_model, newdata = ., type = "response"))
+
+binned <- organisms_of_interest %>%
+  group_by(EUCAST) %>%
+  summarise(n = n(), prop_R = mean(ETEST_R), .groups = "drop")
+
+ggplot() +
+  geom_point(data = binned, aes(x = EUCAST, y = prop_R, size = n), color = "#2a78d6", alpha = 0.6) +
+  geom_line(data = curve_df, aes(x = EUCAST, y = p_R), color = "#d03b3b", linewidth = 1) +
+  geom_vline(xintercept = 17, linetype = "dashed", color = "#898781") +
+  labs(x = "EUCAST disc zone diameter (mm)", y = "P(Etest = R)", size = "n at zone",
+       title = "Logistic fit: P(Etest resistant) by EUCAST zone diameter",
+       subtitle = "Points: observed proportion at each zone value (training data, n=613)") +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank())
+```
+
+**Important caveat on representativeness.** Etest is not ordered on a random sample of
+zones: in Blood (the only specimen type with enough paired data to check), 21.9% of
+Etest-tested isolates have zone <17mm versus only 8.3% of all Blood isolates — Etest is
+preferentially ordered for smaller, more resistant-looking zones (a plausible reflex/
+confirmatory-testing pattern). Conditional on zone diameter (which is what the model
+uses), this kind of selection does not bias the fitted P(Etest=R | zone) curve itself —
+but it does mean the training data is concentrated in the low-zone region and sparse at
+higher zones, and the approach assumes the same zone-to-MIC relationship learned
+(mostly from Blood) applies unchanged to Swab and Urine, which isn't verified here.
+
+```{r blood MIC tested vs not distribution}
+Panels %>%
+  filter(
+    specimen_type == "Blood",
+    organism_or_component == "ESCHERICHIA COLI [202]" |
+      (str_detect(organism_or_component, "^KLEBSIELLA") &
+         !str_detect(organism_or_component, "AEROGENES")) |
+      organism_or_component == "PROTEUS MIRABILIS [338]"
+  ) %>%
+  mutate(EUCAST_zone = as.numeric(`zone_size_M EUCAST`)) %>%
+  filter(!is.na(EUCAST_zone), EUCAST_zone <= 50) %>%
+  mutate(mic_tested = if_else(Both == 1, "MIC tested (Etest done)", "MIC not tested")) %>%
+  ggplot(aes(x = EUCAST_zone, fill = mic_tested)) +
+  geom_vline(xintercept = 17, linetype = "dashed", color = "#898781") +
+  geom_density(alpha = 0.55, color = NA) +
+  scale_x_continuous(breaks = seq(0, 40, 5)) +
+  scale_fill_manual(values = c("MIC tested (Etest done)" = "#eb6834",
+                                "MIC not tested" = "#2a78d6")) +
+  labs(x = "EUCAST disc zone diameter (mm)", y = "Density", fill = NULL,
+       title = "Blood isolates: zone diameter, MIC-tested vs not",
+       subtitle = "E. coli/Klebsiella spp. (excl. aerogenes)/P. mirabilis; dashed = EUCAST R/I cutoff (17mm)") +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank(), legend.position = "top")
+```
+
+Etest-tested Blood isolates (orange) are visibly shifted toward smaller zone diameters
+than untested ones (blue) — the selection-bias pattern behind the caveat above, made
+concrete.
+
+```{r calibration check}
+insample <- organisms_of_interest %>%
+  mutate(p_R = predict(logit_model, type = "response"),
+         p_agree = if_else(EUCAST_interp == "R", p_R, 1 - p_R),
+         p_I_to_R = if_else(EUCAST_interp == "I", p_R, 0),
+         p_R_to_I = if_else(EUCAST_interp == "R", 1 - p_R, 0))
+
+insample %>%
+  summarise(n = n(),
+            Agreement = sum(p_agree), `I to R` = sum(p_I_to_R), `R to I` = sum(p_R_to_I)) %>%
+  mutate(across(c(Agreement, `I to R`, `R to I`), ~ round(., 1))) %>%
+  gt() %>%
+  tab_header(title = "In-sample calibration check",
+             subtitle = "Predicted (summed probabilities) vs actual, on the 613 training samples") %>%
+  tab_options(table.font.size = px(13))
+```
+
+```{r logistic model final predictions}
+pred_counts <- Panels %>%
+  filter(
+    organism_or_component == "ESCHERICHIA COLI [202]" |
+      (str_detect(organism_or_component, "^KLEBSIELLA") &
+         !str_detect(organism_or_component, "AEROGENES")) |
+      organism_or_component == "PROTEUS MIRABILIS [338]"
+  ) %>%
+  mutate(EUCAST = as.numeric(`zone_size_M EUCAST`)) %>%
+  filter(specimen_type %in% c("Swab", "Urine", "Blood"), !is.na(EUCAST), EUCAST <= 50) %>%
+  mutate(
+    EUCAST_interp = if_else(EUCAST < 17, "R", "I"),
+    p_R = predict(logit_model, newdata = tibble(EUCAST = EUCAST), type = "response"),
+    p_agree = if_else(EUCAST_interp == "R", p_R, 1 - p_R),
+    p_I_to_R = if_else(EUCAST_interp == "I", p_R, 0),
+    p_R_to_I = if_else(EUCAST_interp == "R", 1 - p_R, 0)
+  ) %>%
+  group_by(specimen_type) %>%
+  summarise(n = n(),
+            Agreement = sum(p_agree), `I to R` = sum(p_I_to_R), `R to I` = sum(p_R_to_I),
+            .groups = "drop")
+
+pred_counts %>%
+  mutate(across(c(Agreement, `I to R`, `R to I`), round, 1),
+         `Agreement %` = scales::percent(Agreement / n, accuracy = 0.1),
+         `I to R %` = scales::percent(`I to R` / n, accuracy = 0.1),
+         `R to I %` = scales::percent(`R to I` / n, accuracy = 0.1)) %>%
+  select(specimen_type, n, Agreement, `Agreement %`, `I to R`, `I to R %`, `R to I`, `R to I %`) %>%
+  gt(rowname_col = "specimen_type") %>%
+  tab_header(title = "Predicted discordance by specimen type",
+             subtitle = "Expected counts from the fitted logistic model, applied to every isolate's actual zone diameter") %>%
   tab_options(table.font.size = px(13))
 ```
