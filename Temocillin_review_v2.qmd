@@ -501,17 +501,118 @@ headline conclusion is unchanged by deduplication. R-to-I remains the dominant
 discordance direction in both (`r agree_unique[["R to I, n (%)"]]` vs
 `r agree_full[["R to I, n (%)"]]`).
 
-### Episode-level sub-analysis (not performed)
+### Episode-level sub-analysis
 
-A planned sub-analysis would additionally group each patient's repeat samples into
-clinical episodes — e.g. treating all samples within a 30-day window as one episode —
-and check temocillin agreement at the episode level. `temocillin_data.rds` has no
-specimen collection date, verification date, or any other timestamp (confirmed: none of
-its columns are date/datetime-typed, and none hold parseable date strings) — only
-patient ID, organism, specimen type/source, isolate number, and the antibiotic results
-themselves survive the pivot from the raw CHEQS extract. A date-based 30-day episode
-window can't be constructed from this file as it stands, so this sub-analysis is
-deferred until a version of the extract retaining specimen dates is available.
+`temocillin_data.rds` now carries `hours_from`: hours from an arbitrary (undisclosed)
+start date to each culture. The offset hides the actual date, but the gaps between one
+patient's cultures are real elapsed time, so repeat samples can be grouped into
+clinical episodes.
+
+```{r episode gaps}
+# Time from each blood culture to the previous one for the same patient and
+# organism (the first culture of each patient/organism has no gap).
+blood_timed <- blood_only %>%
+  mutate(hours = as.numeric(hours_from)) %>%
+  arrange(ID, organism_or_component, hours) %>%
+  group_by(ID, organism_or_component) %>%
+  mutate(gap_days = (hours - lag(hours)) / 24) %>%
+  ungroup()
+
+episode_window_days <- 14
+
+blood_timed %>%
+  filter(!is.na(gap_days)) %>%
+  ggplot(aes(x = pmax(gap_days, 0.01))) +
+  geom_histogram(bins = 40, fill = "#2a78d6", color = "white") +
+  geom_vline(xintercept = episode_window_days, linetype = "dashed", color = "#898781") +
+  annotate("text", x = episode_window_days, y = Inf, label = paste0(episode_window_days, "-day window"),
+           hjust = -0.1, vjust = 1.5, size = 3, color = "#52514e") +
+  scale_x_log10(breaks = c(0.01, 0.1, 1, 3, 7, 14, 30, 90, 365),
+                labels = c("<0.01", "0.1", "1", "3", "7", "14", "30", "90", "365")) +
+  labs(x = "Days since previous blood culture, same patient and organism (log scale)",
+       y = "Repeat cultures",
+       title = "Time between repeat blood cultures",
+       subtitle = "Repeats fall either within a few days or weeks to months later") +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank())
+```
+
+The gaps fall into two groups: most repeats come within about 3 days (several bottles
+from one draw, or follow-up cultures during the same bacteraemia), and the rest come
+weeks to months later, with almost nothing in between. A culture therefore starts a
+**new episode** if it is more than `r episode_window_days` days after that patient's
+previous culture growing the same organism. Each culture is compared with the one
+before it (a rolling window), so a run of cultures each a few days apart stays one
+episode. The 14-day cutoff falls in the gap between the two groups and matches common
+bacteraemia episode definitions, so a cutoff anywhere from 7 to 14 days gives
+practically the same episodes.
+
+```{r episode assignment}
+blood_episodes <- blood_timed %>%
+  group_by(ID, organism_or_component) %>%
+  mutate(episode = cumsum(is.na(gap_days) | gap_days > episode_window_days)) %>%
+  ungroup() %>%
+  mutate(episode_id = paste(ID, organism_or_component, episode, sep = "_"))
+
+episode_summary <- blood_episodes %>%
+  group_by(episode_id) %>%
+  summarise(
+    n_cultures = n(),
+    span_days = (max(hours) - min(hours)) / 24,
+    eucast_concordant = n_distinct(na.omit(EUCAST_interp)) <= 1,
+    etest_concordant = n_distinct(na.omit(ETEST_interp)) <= 1,
+    .groups = "drop"
+  ) %>%
+  mutate(concordant = eucast_concordant & etest_concordant)
+
+# Index (first) culture of each episode: the standard one-isolate-per-episode
+# convention. Unlike the patient-level analysis above, this keeps episodes
+# whose repeat cultures disagree, using the call made at presentation.
+blood_index <- blood_episodes %>%
+  group_by(episode_id) %>%
+  slice_min(hours, n = 1, with_ties = FALSE) %>%
+  ungroup()
+```
+
+```{r episode summary table}
+tibble(
+  Measure = c("Blood cultures", "Patients", "Episodes (patient + organism)",
+              "Episodes with >1 culture", "Patients with >1 episode",
+              "Multi-culture episodes with discordant S/I/R calls"),
+  n = c(nrow(blood_episodes),
+        n_distinct(blood_episodes$ID),
+        nrow(episode_summary),
+        sum(episode_summary$n_cultures > 1),
+        blood_episodes %>% distinct(ID, episode_id) %>% count(ID) %>% filter(n > 1) %>% nrow(),
+        sum(!episode_summary$concordant & episode_summary$n_cultures > 1))
+) %>%
+  gt(rowname_col = "Measure") %>%
+  tab_header(title = "Clustering of blood cultures into episodes",
+             subtitle = paste0("New episode if >", episode_window_days,
+                               " days since the previous culture, same patient and organism")) %>%
+  fmt_integer(columns = n) %>%
+  tab_options(table.font.size = px(13))
+```
+
+```{r episode agreement}
+agree_episode <- summarise_agreement(blood_index)
+
+bind_rows(
+  agree_full %>% mutate(Cohort = "All blood cultures", .before = 1),
+  agree_unique %>% mutate(Cohort = "One per concordant patient", .before = 1),
+  agree_episode %>% mutate(Cohort = "Index culture per episode", .before = 1)
+) %>%
+  gt(rowname_col = "Cohort") %>%
+  tab_header(title = "Agreement: cultures vs patients vs episodes",
+             subtitle = "Blood culture only") %>%
+  cols_label(n = "n (valid pairs)") %>%
+  tab_options(table.font.size = px(13))
+```
+
+Agreement on the index culture of each episode is `r agree_episode[["Agreement, n (%)"]]`,
+against `r agree_full[["Agreement, n (%)"]]` for all blood cultures. Episode-level
+counting gives a fair denominator: each separate bacteraemia counts once, and a patient
+who comes back months later with a new infection still counts again.
 
 ## Zone diameter distribution (full dataset)
 
