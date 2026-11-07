@@ -349,6 +349,170 @@ blood_only %>%
   tab_options(table.font.size = px(13))
 ```
 
+## Sensitivity analysis: unique patients (Blood culture)
+
+Many patients contribute more than one sample to `blood_only`. One possibility is that
+these "duplicate" rows are mostly re-verification artefacts — the same specimen
+re-verified because a *different* antibiotic's result changed, leaving temocillin's own
+reading untouched. The check below tests that directly, then builds a one-sample-per-
+patient sensitivity dataset and re-runs the main agreement comparison on it.
+
+```{r sensitivity dedup setup}
+# Group rows sharing everything that would identify "the same specimen,
+# re-verified" as tightly as this data allows: patient, organism, specimen
+# type/source, isolate number, and panel. If duplicates were purely
+# re-verification of an unrelated antibiotic, temocillin's own zone/MIC
+# should be identical within every such group.
+dup_groups <- blood_only %>%
+  group_by(ID, organism_or_component, specimen_type, specimen_source, isolate, panel) %>%
+  mutate(n_in_group = n(), group_id = cur_group_id()) %>%
+  ungroup() %>%
+  filter(n_in_group > 1)
+
+dup_group_summary <- dup_groups %>%
+  group_by(group_id) %>%
+  summarise(n = n(),
+            zone_identical = n_distinct(EUCAST) == 1,
+            mic_identical = n_distinct(MIC) == 1,
+            eucast_interp_identical = n_distinct(EUCAST_interp) == 1,
+            etest_interp_identical = n_distinct(ETEST_interp) == 1,
+            .groups = "drop")
+```
+
+```{r sensitivity dedup table}
+tibble(
+  Check = c("Zone diameter identical", "MIC identical",
+            "EUCAST S/I/R call identical", "Etest S/I/R call identical"),
+  `Groups matching` = c(sum(dup_group_summary$zone_identical),
+                         sum(dup_group_summary$mic_identical),
+                         sum(dup_group_summary$eucast_interp_identical),
+                         sum(dup_group_summary$etest_interp_identical)),
+  `Out of groups` = nrow(dup_group_summary)
+) %>%
+  gt() %>%
+  tab_header(title = "Do 'duplicate' samples re-verify an unchanged temocillin result?",
+             subtitle = paste0("Rows sharing identical patient, organism, specimen type/source, isolate ",
+                                "and panel (", nrow(dup_groups), " rows in ", nrow(dup_group_summary),
+                                " groups) — Blood culture only")) %>%
+  tab_options(table.font.size = px(13))
+```
+
+Even at this tightest possible grouping, the raw zone diameter and MIC usually
+**differ** between "duplicate" rows — not what pure re-verification of an unrelated
+antibiotic would produce. This looks like genuine repeat testing (e.g. multiple blood
+culture bottles/draws) with real reading variability, rather than a reporting artefact.
+The categorical S/I/R call is more stable than the raw reading, but still disagrees in a
+minority of groups.
+
+```{r patient concordance setup}
+# Classify each patient by whether their repeat samples agree on the
+# categorical S/I/R call (not the raw zone/MIC, since the comparison this
+# report cares about is the categorical EUCAST vs Etest agreement).
+patient_concordance <- blood_only %>%
+  group_by(ID) %>%
+  summarise(
+    n_samples = n(),
+    eucast_concordant = n_distinct(na.omit(EUCAST_interp)) <= 1,
+    etest_concordant = n_distinct(na.omit(ETEST_interp)) <= 1,
+    eucast_calls = paste(sort(unique(na.omit(EUCAST_interp))), collapse = "/"),
+    etest_calls = paste(sort(unique(na.omit(ETEST_interp))), collapse = "/"),
+    zone_range = paste(range(EUCAST, na.rm = TRUE), collapse = "-"),
+    mic_range = paste(range(MIC, na.rm = TRUE), collapse = "-"),
+    .groups = "drop"
+  ) %>%
+  mutate(concordant = eucast_concordant & etest_concordant)
+
+n_discordant_patients <- sum(!patient_concordance$concordant)
+```
+
+`r n_discordant_patients` of `r nrow(patient_concordance)` patients have at least one
+EUCAST or Etest S/I/R call that disagrees with another sample of theirs. Per the decision
+not to force a single value for these, they're excluded from the deduplicated dataset
+below and reported here instead, so they can be reviewed individually rather than
+collapsed into an arbitrary choice.
+
+```{r discordant patients table}
+patient_concordance %>%
+  filter(!concordant) %>%
+  select(ID, n_samples, eucast_calls, etest_calls, zone_range, mic_range) %>%
+  arrange(desc(n_samples)) %>%
+  gt(rowname_col = "ID") %>%
+  tab_header(title = "Patients with discordant temocillin interpretation across repeat samples",
+             subtitle = "Blood culture only — EUCAST and/or Etest S/I/R call differs between that patient's samples") %>%
+  cols_label(n_samples = "n samples", eucast_calls = "EUCAST calls", etest_calls = "Etest calls",
+             zone_range = "Zone range (mm)", mic_range = "MIC range (mg/L)") %>%
+  tab_options(table.font.size = px(12))
+```
+
+```{r unique patient dataset}
+# One row per concordant patient (all their samples already agree on both
+# S/I/R calls, so any single row represents that patient's result).
+concordant_ids <- patient_concordance %>% filter(concordant) %>% pull(ID)
+
+blood_unique <- blood_only %>%
+  filter(ID %in% concordant_ids) %>%
+  distinct(ID, .keep_all = TRUE)
+```
+
+```{r sensitivity crosstab}
+xtab_unique <- blood_unique %>%
+  mutate(across(c(EUCAST_interp, ETEST_interp), ~ factor(.x, levels = lvl))) %>%
+  count(EUCAST_interp, ETEST_interp, .drop = FALSE) %>%
+  pivot_wider(names_from = ETEST_interp, names_prefix = "ETEST:", values_from = n, values_fill = 0)
+
+xtab_unique %>%
+  arrange(EUCAST_interp) %>%
+  gt(rowname_col = "EUCAST_interp") %>%
+  tab_header(title = "Sensitivity analysis: categorical agreement, one sample per concordant patient",
+             subtitle = paste0("Blood culture only; n = ", nrow(blood_unique), " concordant patients (",
+                                n_discordant_patients, " discordant patients excluded, reported above)")) %>%
+  tab_stubhead(label = "EUCAST") %>%
+  cols_label_with(fn = ~ sub("ETEST:", "", .x)) %>%
+  tab_spanner(label = "Etest", columns = starts_with("ETEST:")) %>%
+  tab_style(style = cell_fill(color = "#E8F4EA"),
+            locations = list(
+              cells_body(columns = `ETEST:S`, rows = EUCAST_interp == "S"),
+              cells_body(columns = `ETEST:I`, rows = EUCAST_interp == "I"),
+              cells_body(columns = `ETEST:R`, rows = EUCAST_interp == "R"))) %>%
+  tab_style(style = list(cell_fill(color = "#F8D7DA"), cell_text(weight = "bold")),
+            locations = cells_body(columns = `ETEST:S`, rows = EUCAST_interp == "R")) %>%
+  tab_style(style = cell_fill(color = "#F8D7DA"),
+            locations = list(
+              cells_body(columns = `ETEST:R`, rows = EUCAST_interp == "I"),
+              cells_body(columns = `ETEST:I`, rows = EUCAST_interp == "R"))) %>%
+  grand_summary_rows(columns = starts_with("ETEST:"), fns = list(Total = ~ sum(.)), fmt = ~ fmt_integer(.))
+```
+
+```{r sensitivity agreement summary}
+agree_full <- summarise_agreement(blood_only)
+agree_unique <- summarise_agreement(blood_unique)
+
+agree_unique %>%
+  gt() %>%
+  tab_header(title = "Sensitivity analysis: agreement summary",
+             subtitle = "One sample per concordant patient — Blood culture only") %>%
+  cols_label(n = "n (valid pairs)") %>%
+  tab_options(table.font.size = px(13))
+```
+
+Agreement is `r agree_unique[["Agreement, n (%)"]]` on the deduplicated, concordant-only
+cohort versus `r agree_full[["Agreement, n (%)"]]` on the full multi-sample cohort — the
+headline conclusion is unchanged by deduplication. R-to-I remains the dominant
+discordance direction in both (`r agree_unique[["R to I, n (%)"]]` vs
+`r agree_full[["R to I, n (%)"]]`).
+
+### Episode-level sub-analysis (not performed)
+
+A planned sub-analysis would additionally group each patient's repeat samples into
+clinical episodes — e.g. treating all samples within a 30-day window as one episode —
+and check temocillin agreement at the episode level. `temocillin_data.rds` has no
+specimen collection date, verification date, or any other timestamp (confirmed: none of
+its columns are date/datetime-typed, and none hold parseable date strings) — only
+patient ID, organism, specimen type/source, isolate number, and the antibiotic results
+themselves survive the pivot from the raw CHEQS extract. A date-based 30-day episode
+window can't be constructed from this file as it stands, so this sub-analysis is
+deferred until a version of the extract retaining specimen dates is available.
+
 ## Zone diameter distribution (full dataset)
 
 ```{r zone diameter full dataset setup}
