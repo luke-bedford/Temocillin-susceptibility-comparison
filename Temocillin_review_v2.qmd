@@ -594,6 +594,36 @@ tibble(
   tab_options(table.font.size = px(13))
 ```
 
+```{r discordant episodes table}
+# Every culture in the multi-culture episodes whose EUCAST and/or Etest
+# S/I/R call changes within the episode. Time is shown relative to the
+# episode's first culture (the absolute start date is not disclosed).
+discordant_episode_ids <- episode_summary %>%
+  filter(!concordant, n_cultures > 1) %>%
+  pull(episode_id)
+
+blood_episodes %>%
+  filter(episode_id %in% discordant_episode_ids) %>%
+  group_by(episode_id) %>%
+  mutate(day = (hours - min(hours)) / 24) %>%
+  ungroup() %>%
+  arrange(ID, organism_or_component, hours) %>%
+  mutate(group = paste0(ID, " — ", organism)) %>%
+  select(group, day, specimen_source, EUCAST, EUCAST_interp, MIC, ETEST_interp, match_status) %>%
+  gt(groupname_col = "group") %>%
+  tab_header(title = "Episodes with discordant temocillin results between cultures",
+             subtitle = paste0("Blood culture only; ", length(discordant_episode_ids),
+                               " episodes where the EUCAST and/or Etest S/I/R call changes")) %>%
+  cols_label(day = "Day", specimen_source = "Source", EUCAST = "Zone (mm)",
+             EUCAST_interp = "EUCAST", MIC = "MIC (mg/L)", ETEST_interp = "Etest",
+             match_status = "EUCAST vs Etest") %>%
+  fmt_number(columns = day, decimals = 1) %>%
+  sub_missing(missing_text = "—") %>%
+  tab_style(style = cell_fill(color = "#F8D7DA"),
+            locations = cells_body(columns = match_status, rows = match_status != "Agreement")) %>%
+  tab_options(table.font.size = px(12))
+```
+
 ```{r episode agreement}
 agree_episode <- summarise_agreement(blood_index)
 
